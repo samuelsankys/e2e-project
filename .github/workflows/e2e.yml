@@ -1,0 +1,90 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente alvo'
+        required: true
+        default: 'qa'
+        type: choice
+        options: [dev, qa, staging, prod]
+      tag:
+        description: 'Filtro por tag Gherkin (ex: @smoke). Vazio = roda tudo.'
+        required: false
+        default: ''
+        type: string
+      feature:
+        description: 'Nome do spec sem extensao (ex: login). Vazio = roda todos.'
+        required: false
+        default: ''
+        type: string
+  # Permite o CI de outro repositorio (o "projeto real") disparar esta suite via API:
+  #   POST /repos/<org>/e2e-project/dispatches
+  #   { "event_type": "e2e-trigger", "client_payload": { "environment": "qa", "tag": "@smoke",
+  #     "feature": "", "callback_repo": "<org>/projeto-real", "callback_sha": "<sha>" } }
+  repository_dispatch:
+    types: [e2e-trigger]
+
+jobs:
+  e2e:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [chromium, firefox, webkit]
+    env:
+      TEST_ENV: ${{ github.event.inputs.environment || github.event.client_payload.environment || 'qa' }}
+      TAG: ${{ github.event.inputs.tag || github.event.client_payload.tag || '' }}
+      FEATURE: ${{ github.event.inputs.feature || github.event.client_payload.feature || '' }}
+      BASE_URL: ${{ secrets.BASE_URL }}
+      API_URL: ${{ secrets.API_URL }}
+      TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+      TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps
+
+      - name: Run tests
+        run: |
+          ARGS="--project=${{ matrix.project }}"
+          if [ -n "$TAG" ]; then ARGS="$ARGS --grep $TAG"; fi
+          if [ -n "$FEATURE" ]; then ARGS="$ARGS tests/generated/$FEATURE.spec.ts"; fi
+          npx playwright test $ARGS
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-${{ matrix.project }}
+          path: playwright-report/
+          retention-days: 14
+
+  # Handoff de volta: só roda quando disparado via repository_dispatch com callback informado.
+  # Reporta o resultado como commit status no repositorio/SHA de origem (o "projeto real").
+  callback:
+    needs: e2e
+    if: always() && github.event_name == 'repository_dispatch' && github.event.client_payload.callback_repo != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reportar status no repositorio de origem
+        env:
+          GH_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+          STATE: ${{ needs.e2e.result == 'success' && 'success' || 'failure' }}
+        run: |
+          gh api "repos/${{ github.event.client_payload.callback_repo }}/statuses/${{ github.event.client_payload.callback_sha }}" \
+            -f state="$STATE" \
+            -f context="e2e-project" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

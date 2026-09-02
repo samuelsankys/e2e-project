@@ -1,0 +1,141 @@
+# Pipeline E2E — equivalente GitLab do .github/workflows/e2e.yml.
+#
+# Rodar manualmente:
+#   CI/CD > Pipelines > Run pipeline (o formulario ja traz TEST_ENV, TAG e FEATURE).
+#
+# Disparar a partir do CI do projeto real (equivalente ao repository_dispatch):
+#   curl -X POST \
+#     -F token=$TRIGGER_TOKEN \
+#     -F ref=main \
+#     -F "variables[TEST_ENV]=qa" \
+#     -F "variables[TAG]=@smoke" \
+#     -F "variables[CALLBACK_PROJECT]=grupo/projeto-real" \
+#     -F "variables[CALLBACK_SHA]=$CI_COMMIT_SHA" \
+#     "https://gitlab.com/api/v4/projects/<ID_DESTE_PROJETO>/trigger/pipeline"
+#
+# Variaveis a cadastrar em Settings > CI/CD > Variables (protegidas):
+#   BASE_URL, API_URL                             — do ambiente alvo
+#   TEST_USER_1_EMAIL, TEST_USER_1_PASSWORD       — uma conta do pool
+#   TEST_USER_2_EMAIL, TEST_USER_2_PASSWORD       — ... e assim por diante
+#   CALLBACK_TOKEN                                — token com escopo api no projeto de origem,
+#                                                   so necessario se usar o callback de status
+#
+# Cadastre uma variavel por conta e marque as senhas como "Masked". O numero de contas
+# define o paralelismo da suite (ver playwright.config.ts): mais contas, execucao mais rapida.
+
+stages:
+  - check
+  - test
+  - callback
+
+variables:
+  # A imagem precisa acompanhar a versao instalada de @playwright/test.
+  # Divergiu, o job falha com "browser not found" — basta atualizar a tag aqui.
+  PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.62.1-noble
+  npm_config_cache: "$CI_PROJECT_DIR/.npm"
+
+  TEST_ENV:
+    value: "qa"
+    options: ["dev", "qa", "staging", "prod"]
+    description: "Ambiente alvo"
+  TAG:
+    value: ""
+    description: "Filtro por tag Gherkin (ex: @smoke). Vazio = roda tudo."
+  FEATURE:
+    value: ""
+    description: "Nome do spec sem extensao (ex: login). Vazio = roda todos."
+  CALLBACK_PROJECT:
+    value: ""
+    description: "Projeto de origem (grupo/nome ou ID) para reportar o status. Vazio = sem callback."
+  CALLBACK_SHA:
+    value: ""
+    description: "Commit SHA no projeto de origem que recebe o status."
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "trigger"
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+.node:
+  image: node:20-bookworm-slim
+  interruptible: true
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm/
+  before_script:
+    - npm ci --prefer-offline --no-audit --fund=false
+
+typecheck:
+  extends: .node
+  stage: check
+  script:
+    - npm run typecheck
+
+e2e:
+  extends: .node
+  stage: test
+  image: $PLAYWRIGHT_IMAGE
+  timeout: 30m
+  parallel:
+    matrix:
+      - PROJECT: [chromium, firefox, webkit]
+  script:
+    - |
+      set -- --project="$PROJECT"
+      if [ -n "$TAG" ]; then set -- "$@" --grep "$TAG"; fi
+      # FEATURE e tratado como filtro de caminho, entao continua funcionando
+      # quando os specs forem movidos para subpastas por dominio.
+      if [ -n "$FEATURE" ]; then set -- "$@" "$FEATURE"; fi
+      npx playwright test "$@"
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - playwright-report/
+      - test-results/
+    reports:
+      # Alimenta a aba "Tests" do pipeline e o widget de MR com os testes que falharam.
+      junit: test-results/junit.xml
+
+# Reporta o resultado como commit status no projeto de origem — equivalente ao
+# job "callback" do GitHub Actions. Dois jobs porque o GitLab decide o estado
+# pela regra `when`, nao por uma expressao lida em runtime.
+.callback:
+  stage: callback
+  image: curlimages/curl:8.11.1
+  dependencies: []
+  interruptible: false
+  script:
+    - |
+      projeto=$(printf '%s' "$CALLBACK_PROJECT" | sed 's|/|%2F|g')
+      curl --fail-with-body -sS -X POST \
+        --header "PRIVATE-TOKEN: $CALLBACK_TOKEN" \
+        "$CI_API_V4_URL/projects/$projeto/statuses/$CALLBACK_SHA" \
+        --data-urlencode "state=$STATE" \
+        --data-urlencode "name=e2e-project" \
+        --data-urlencode "target_url=$CI_PIPELINE_URL"
+
+callback:sucesso:
+  extends: .callback
+  variables:
+    STATE: success
+  rules:
+    - if: $CALLBACK_PROJECT != "" && $CALLBACK_SHA != ""
+      when: on_success
+
+callback:falha:
+  extends: .callback
+  variables:
+    STATE: failed
+  rules:
+    - if: $CALLBACK_PROJECT != "" && $CALLBACK_SHA != ""
+      when: on_failure

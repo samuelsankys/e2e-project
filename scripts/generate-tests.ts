@@ -17,7 +17,9 @@ const CONVENTIONS = `
 Convencoes obrigatorias do projeto para specs Playwright gerados:
 
 1. Importe "test" e "expect" de "../../src/fixtures" (nunca de "@playwright/test" diretamente).
-2. Importe "env" de "../../src/config/env" quando precisar de baseURL, credenciais, etc. Nunca hardcode credenciais.
+2. Para credenciais, use SEMPRE a fixture "testUser" ({ email, password }), nunca "env.user" e nunca
+   valores hardcoded. Cada worker paralelo recebe uma conta distinta do pool por meio dessa fixture.
+   Importe "env" de "../../src/config/env" apenas para dados nao-sensiveis (baseURL, apiURL, testEnv).
 3. Use os Page Objects ja injetados como fixtures (ex.: "loginPage") em vez de seletores soltos, quando existir Page Object aplicavel em src/pages.
 4. Se o cenario precisar de um Page Object que ainda nao existe, gere o codigo do teste mesmo assim
    usando seletores semanticos (getByRole, getByLabel, getByText) e sinalize com um comentario

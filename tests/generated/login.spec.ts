@@ -3,19 +3,18 @@
  * Nao editar a logica do fluxo BDD aqui sem atualizar o .feature correspondente.
  */
 import { test, expect } from '../../src/fixtures';
-import { env } from '../../src/config/env';
 
 test.describe('Login', () => {
-  test('login com credenciais validas', { tag: ['@smoke', '@login'] }, async ({ page, loginPage }) => {
+  test('login com credenciais validas', { tag: ['@smoke', '@login'] }, async ({ page, loginPage, testUser }) => {
     await loginPage.goto('/login');
-    await loginPage.login(env.user.email, env.user.password);
+    await loginPage.login(testUser.email, testUser.password);
 
     await expect(page).toHaveURL(/dashboard|home|account/i);
   });
 
-  test('login com senha invalida', { tag: ['@regression', '@login'] }, async ({ loginPage }) => {
+  test('login com senha invalida', { tag: ['@regression', '@login'] }, async ({ loginPage, testUser }) => {
     await loginPage.goto('/login');
-    await loginPage.login(env.user.email, 'senha-incorreta-123');
+    await loginPage.login(testUser.email, 'senha-incorreta-123');
 
     await expect(loginPage.errorMessage).toBeVisible();
   });
